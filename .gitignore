@@ -1,0 +1,32 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Output directory
+dist/
+build/
+
+# Local env files / credentials
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+crediental.md
+credentials.md
+*.key
+*.pem
