@@ -1,6 +1,7 @@
 import os
 import json
 from dotenv import load_dotenv
+from image_prompts import IMAGE_ANALYSIS_PROMPT, COMPARISON_PROMPT_TEMPLATE
 
 # Load environment variables from .env in project root
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'))
@@ -22,16 +23,7 @@ def generate_text_from_image(image_bytes: bytes, model_name: str = "gemini-2.5-f
             "data": image_bytes,
         }
         
-        prompt = """
-Analyze the following image and extract the requested fields. 
-Return a JSON object ONLY with the following exact keys:
-1. "confidence": Estimate your confidence level as a percentage (e.g. "95%").
-2. "activity": What is happening/the main action in the image. Keep it brief.
-3. "objects": A comma-separated list of key objects visible in the image.
-4. "summary": A brief, one-sentence summary of the overall scene.
-
-Do not write any paragraphs or extra conversational text (no theory). Output ONLY raw JSON.
-"""
+        prompt = IMAGE_ANALYSIS_PROMPT
         response = model.generate_content([prompt, img_part])
         content = response.text.strip()
         
@@ -62,26 +54,18 @@ Do not write any paragraphs or extra conversational text (no theory). Output ONL
     else:
         raise RuntimeError("Unsupported provider configured.")
 
-def compare_descriptions(desc1_dict: dict, desc2_dict: dict) -> dict:
+def compare_descriptions(desc1_dict: dict, desc2_dict: dict, model_name: str = "gemini-2.5-flash") -> dict:
     """Compare two structured description dicts and calculate a coincidence score (0-100%)."""
-    model = GenerativeModel("gemini-2.5-flash")
+    model = GenerativeModel(model_name)
     
-    prompt = f"""
-Compare the following two structured image analyses and determine how closely they match in meaning, context, key details, objects, and activity.
-Output a JSON object ONLY, with the keys "score" (integer from 0 to 100 representing similarity/coincidence) and "reason" (a short explanation in English).
-
-Analysis 1 (Model 1):
-- Activity: {desc1_dict.get('activity')}
-- Objects: {desc1_dict.get('objects')}
-- Summary: {desc1_dict.get('summary')}
-
-Analysis 2 (Ground Truth):
-- Activity: {desc2_dict.get('activity')}
-- Objects: {desc2_dict.get('objects')}
-- Summary: {desc2_dict.get('summary')}
-
-Provide your response in raw JSON format. Do not use markdown blocks.
-"""
+    prompt = COMPARISON_PROMPT_TEMPLATE.format(
+        m1_activity=desc1_dict.get('activity'),
+        m1_objects=desc1_dict.get('objects'),
+        m1_summary=desc1_dict.get('summary'),
+        gt_activity=desc2_dict.get('activity'),
+        gt_objects=desc2_dict.get('objects'),
+        gt_summary=desc2_dict.get('summary')
+    )
     response = model.generate_content(prompt)
     content = response.text.strip()
     

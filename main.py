@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import io
 import os
-from api import generate_text_from_image, compare_descriptions
+from api import generate_text_from_image
+from batchrunner import parse_ground_truth_excel, run_batch_comparison, results_to_excel
 
 # Set Page Config
 st.set_page_config(
-    page_title="Image-to-Text Studio",
+    page_title="Image-to-Text Analyzer",
     page_icon="🖼️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -26,9 +27,7 @@ st.markdown("""
     .main-title {
         font-size: 42px;
         font-weight: 800;
-        background: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        color: #ffffff;
         margin-bottom: 5px;
     }
     .sub-title {
@@ -131,20 +130,13 @@ with st.sidebar:
         
     st.write("---")
     
-    # Model Configurations
-    st.markdown("### Model Choices")
+    # Model Configuration
+    st.markdown("### Model Choice")
     model1_name = st.selectbox(
-        "Model 1 (Main Describer)",
+        "Image Analysis Model",
         ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-3.5-flash"],
         index=0,
         help="Model used to analyze images in Step 1."
-    )
-    
-    model2_name = st.selectbox(
-        "Model 2 (Ground Truth Simulator)",
-        ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash"],
-        index=0,
-        help="Model used to generate ground truth if you don't upload a file in Step 2."
     )
     
     st.write("---")
@@ -168,14 +160,15 @@ if "ground_truth" not in st.session_state:
 if "comparison_results" not in st.session_state:
     st.session_state.comparison_results = []
 
-# Core Steps Tabs
-tab1, tab2, tab3 = st.tabs([
+# Two-Step Tabs
+tab1, tab2 = st.tabs([
     "📤 Step 1: Upload & Process", 
-    "🎯 Step 2: Establish Ground Truth", 
-    "⚖️ Step 3: Compare & Evaluate"
+    "⚖️ Step 2: Compare & Evaluate"
 ])
 
-# --- TAB 1: UPLOAD & PROCESS ---
+# ═══════════════════════════════════════════════════════════════════
+# TAB 1: UPLOAD & PROCESS
+# ═══════════════════════════════════════════════════════════════════
 with tab1:
     st.header("Bulk Image Upload & Analysis")
     st.write("Upload a batch of images to extract structured features: Confidence, Activity, Objects, and Summary.")
@@ -290,167 +283,79 @@ with tab1:
         )
 
 
-# --- TAB 2: ESTABLISH GROUND TRUTH ---
+# ═══════════════════════════════════════════════════════════════════
+# TAB 2: COMPARE & EVALUATE (Ground Truth Upload + LLM Comparison)
+# ═══════════════════════════════════════════════════════════════════
 with tab2:
-    st.header("Define Baseline Ground Truth")
-    st.write("Compare Model 1 against a designated Ground Truth dataset. Upload a pre-existing sheet or generate it automatically.")
-    
-    col_upload, col_auto = st.columns(2)
-    
-    with col_upload:
-        st.subheader("Option A: Upload Ground Truth Excel")
+    st.header("Semantic Coincidence Audit")
+    st.write("Upload a Ground Truth Excel sheet, then run the LLM evaluator to compare Model 1 output against it.")
+
+    if not st.session_state.model1_results:
+        st.warning("Complete Step 1 first — analyze your images before running a comparison.")
+    else:
+        # --- Ground Truth Upload Section ---
+        st.subheader("📂 Upload Ground Truth Data")
         uploaded_gt_file = st.file_uploader(
-            "Upload Ground Truth spreadsheet", 
+            "Upload Ground Truth Excel (must include image names matching Step 1)",
             type=["xlsx", "xls"],
-            key="gt_uploader_main"
+            key="gt_uploader_step2"
         )
-        
+
         if uploaded_gt_file:
             try:
-                df_gt = pd.read_excel(uploaded_gt_file)
-                cols = {c.lower().strip(): c for c in df_gt.columns}
-                
-                # Auto-detect key columns
-                img_col = next((cols[p] for p in ["image name", "image", "file name", "filename", "name"] if p in cols), df_gt.columns[0])
-                act_col = next((cols[p] for p in ["activity", "action"] if p in cols), None)
-                obj_col = next((cols[p] for p in ["objects", "key objects", "tags"] if p in cols), None)
-                sum_col = next((cols[p] for p in ["summary", "description", "desc", "ground truth description", "ground truth"] if p in cols), None)
-                conf_col = next((cols[p] for p in ["confidence", "conf"] if p in cols), None)
-                
-                # Parse to state
-                st.session_state.ground_truth = {}
-                for _, row in df_gt.iterrows():
-                    name = str(row[img_col]).strip()
-                    activity = str(row[act_col]).strip() if act_col else "N/A"
-                    objects = str(row[obj_col]).strip() if obj_col else "N/A"
-                    confidence = str(row[conf_col]).strip() if conf_col else "N/A"
-                    
-                    if sum_col:
-                        summary = str(row[sum_col]).strip()
-                    elif len(df_gt.columns) > 1:
-                        non_img = [c for c in df_gt.columns if c != img_col]
-                        summary = str(row[non_img[0]]).strip()
-                    else:
-                        summary = "N/A"
-                        
-                    st.session_state.ground_truth[name] = {
-                        "confidence": confidence,
-                        "activity": activity,
-                        "objects": objects,
-                        "summary": summary
-                    }
-                st.success("Ground Truth dataset aligned successfully!")
+                gt_bytes = uploaded_gt_file.read()
+                st.session_state.ground_truth = parse_ground_truth_excel(gt_bytes)
+                st.success(f"Ground Truth loaded: {len(st.session_state.ground_truth)} entries parsed.")
             except Exception as e:
-                st.error(f"Error parsing ground truth Excel: {e}")
-                
-    with col_auto:
-        st.subheader("Option B: Auto-generate via Model 2")
-        if not st.session_state.uploaded_images:
-            st.info("Upload images in Step 1 to allow auto-generation of Ground Truth.")
-        else:
-            if st.button("🤖 Generate Baseline Ground Truth", key="btn_run_model2"):
-                st.session_state.ground_truth = {}
-                progress_bar_gt = st.progress(0)
-                
-                for idx, img in enumerate(st.session_state.uploaded_images):
-                    img_name = img["name"]
-                    img_bytes = img["bytes"]
-                    
-                    with st.spinner(f"Generating benchmark for {img_name}..."):
-                        try:
-                            res = generate_text_from_image(img_bytes, model_name=model2_name)
-                            st.session_state.ground_truth[img_name] = res
-                        except Exception as e:
-                            st.session_state.ground_truth[img_name] = {
-                                "confidence": "N/A",
-                                "activity": f"Error: {e}",
-                                "objects": "N/A",
-                                "summary": "N/A"
-                            }
-                    progress_bar_gt.progress((idx + 1) / len(st.session_state.uploaded_images))
-                st.success("Ground Truth benchmarks set successfully!")
+                st.error(f"Error parsing Ground Truth Excel: {e}")
 
-    # Display Ground Truth Dataset
-    if st.session_state.ground_truth:
+        # Show loaded ground truth summary
+        if st.session_state.ground_truth:
+            with st.expander("📋 Preview Ground Truth Data", expanded=False):
+                df_gt_preview = pd.DataFrame([
+                    {
+                        "Image Name": name,
+                        "Confidence": res.get("confidence", "N/A"),
+                        "Activity": res.get("activity", "N/A"),
+                        "Objects": res.get("objects", "N/A"),
+                        "Summary": res.get("summary", "N/A")
+                    }
+                    for name, res in st.session_state.ground_truth.items()
+                ])
+                st.dataframe(df_gt_preview, use_container_width=True)
+
         st.write("---")
-        st.subheader("Current Ground Truth Dataset")
-        df_gt_display = pd.DataFrame([
-            {
-                "Image Name": name,
-                "Confidence": res.get("confidence", "N/A"),
-                "Activity": res.get("activity", "N/A"),
-                "Objects": res.get("objects", "N/A"),
-                "Summary": res.get("summary", "N/A")
-            }
-            for name, res in st.session_state.ground_truth.items()
-        ])
-        st.dataframe(df_gt_display, use_container_width=True)
-        
-        output_gt = io.BytesIO()
-        with pd.ExcelWriter(output_gt, engine='openpyxl') as writer:
-            df_gt_display.to_excel(writer, index=False, sheet_name='Ground Truth')
-        excel_gt_data = output_gt.getvalue()
-        
-        st.download_button(
-            label="📥 Download Ground Truth Excel Sheet",
-            data=excel_gt_data,
-            file_name="ground_truth.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
 
+        # --- Run Comparison Section ---
+        st.subheader("⚖️ Run LLM Comparison")
 
-# --- TAB 3: COMPARE & EVALUATE ---
-with tab3:
-    st.header("Semantic Coincidence Audit")
-    
-    if not st.session_state.model1_results or not st.session_state.ground_truth:
-        st.warning("Ensure Step 1 (Model 1 Results) and Step 2 (Ground Truth Dataset) are complete before starting the evaluation.")
-    else:
-        if st.button("⚖️ Run Semantic Coincidence Audit", key="btn_run_comparison"):
-            st.session_state.comparison_results = []
-            progress_bar_comp = st.progress(0)
-            img_names = list(st.session_state.model1_results.keys())
-            
-            for idx, name in enumerate(img_names):
-                desc1 = st.session_state.model1_results.get(name, {})
-                desc2 = st.session_state.ground_truth.get(name, {})
-                
-                # Standardize to dict if string
-                if not isinstance(desc1, dict):
-                    desc1 = {"confidence": "N/A", "activity": "N/A", "objects": "N/A", "summary": desc1}
-                if not isinstance(desc2, dict):
-                    desc2 = {"confidence": "N/A", "activity": "N/A", "objects": "N/A", "summary": desc2}
-                    
-                with st.spinner(f"Auditing {name}..."):
-                    try:
-                        eval_res = compare_descriptions(desc1, desc2)
-                        st.session_state.comparison_results.append({
-                            "Image Name": name,
-                            "Model 1 Activity": desc1.get("activity", "N/A"),
-                            "Model 1 Objects": desc1.get("objects", "N/A"),
-                            "Model 1 Summary": desc1.get("summary", "N/A"),
-                            "Ground Truth Activity": desc2.get("activity", "N/A"),
-                            "Ground Truth Objects": desc2.get("objects", "N/A"),
-                            "Ground Truth Summary": desc2.get("summary", "N/A"),
-                            "Coincidence Score (%)": eval_res.get("score", 0),
-                            "Reason": eval_res.get("reason", "N/A")
-                        })
-                    except Exception as e:
-                        st.session_state.comparison_results.append({
-                            "Image Name": name,
-                            "Model 1 Activity": desc1.get("activity", "N/A"),
-                            "Model 1 Objects": desc1.get("objects", "N/A"),
-                            "Model 1 Summary": desc1.get("summary", "N/A"),
-                            "Ground Truth Activity": desc2.get("activity", "N/A"),
-                            "Ground Truth Objects": desc2.get("objects", "N/A"),
-                            "Ground Truth Summary": desc2.get("summary", "N/A"),
-                            "Coincidence Score (%)": 0,
-                            "Reason": f"Audit Error: {e}"
-                        })
-                progress_bar_comp.progress((idx + 1) / len(img_names))
-            st.success("Semantic audit complete!")
+        if not st.session_state.ground_truth:
+            st.info("Upload a Ground Truth Excel file above to enable the comparison.")
+        else:
+            # Model Selection for Evaluation/Comparison
+            comparison_model_name = st.selectbox(
+                "Select Model for Semantic Comparison",
+                ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-3.5-flash"],
+                index=0,
+                help="Model used to perform the semantic evaluation/coincidence audit."
+            )
 
-    # Display comparison audit dashboard
+            if st.button("🚀 Run Semantic Coincidence Audit", key="btn_run_comparison"):
+                progress_bar_comp = st.progress(0)
+
+                def update_progress(current, total):
+                    progress_bar_comp.progress(current / total)
+
+                with st.spinner("Running batch comparison via LLM evaluator..."):
+                    st.session_state.comparison_results = run_batch_comparison(
+                        st.session_state.model1_results,
+                        st.session_state.ground_truth,
+                        model_name=comparison_model_name,
+                        progress_callback=update_progress
+                    )
+                st.success("Semantic audit complete!")
+
+    # ── Display Comparison Dashboard ──
     if st.session_state.comparison_results:
         df_comp = pd.DataFrame(st.session_state.comparison_results)
         avg_score = df_comp["Coincidence Score (%)"].mean()
@@ -494,7 +399,8 @@ with tab3:
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
                         <div style="background: rgba(0, 0, 0, 0.02); padding: 12px; border-radius: 8px; border-left: 3px solid #6366f1;">
                             <div style="font-size: 12px; font-weight: 600; color: #6366f1; text-transform: uppercase;">Model 1 Output</div>
-                            <div style="margin-top: 5px; font-size: 14px;"><strong>Activity:</strong> {item["Model 1 Activity"]}</div>
+                            <div style="margin-top: 5px; font-size: 14px;"><strong>Confidence:</strong> {item.get("Model 1 Confidence", "N/A")}%</div>
+                            <div style="margin-top: 3px; font-size: 14px;"><strong>Activity:</strong> {item["Model 1 Activity"]}</div>
                             <div style="margin-top: 3px; font-size: 14px;"><strong>Summary:</strong> {item["Model 1 Summary"]}</div>
                             <div style="margin-top: 5px;">
                                 {''.join([f'<span class="object-badge" style="background: rgba(99,102,241,0.08);">{obj.strip()}</span>' for obj in item["Model 1 Objects"].split(',') if obj.strip()])}
@@ -503,7 +409,8 @@ with tab3:
                         
                         <div style="background: rgba(0, 0, 0, 0.02); padding: 12px; border-radius: 8px; border-left: 3px solid #14b8a6;">
                             <div style="font-size: 12px; font-weight: 600; color: #14b8a6; text-transform: uppercase;">Ground Truth</div>
-                            <div style="margin-top: 5px; font-size: 14px;"><strong>Activity:</strong> {item["Ground Truth Activity"]}</div>
+                            <div style="margin-top: 5px; font-size: 14px;"><strong>Confidence:</strong> {item.get("Ground Truth Confidence", "N/A")}%</div>
+                            <div style="margin-top: 3px; font-size: 14px;"><strong>Activity:</strong> {item["Ground Truth Activity"]}</div>
                             <div style="margin-top: 3px; font-size: 14px;"><strong>Summary:</strong> {item["Ground Truth Summary"]}</div>
                             <div style="margin-top: 5px;">
                                 {''.join([f'<span class="object-badge" style="background: rgba(20,184,166,0.08); color: #0d9488; border-color: rgba(20,184,166,0.2);">{obj.strip()}</span>' for obj in item["Ground Truth Objects"].split(',') if obj.strip()])}
@@ -532,10 +439,8 @@ with tab3:
         styled_df = df_comp.style.map(color_score, subset=["Coincidence Score (%)"])
         st.dataframe(styled_df, use_container_width=True)
         
-        output_comp = io.BytesIO()
-        with pd.ExcelWriter(output_comp, engine='openpyxl') as writer:
-            df_comp.to_excel(writer, index=False, sheet_name='Comparison Results')
-        excel_comp_data = output_comp.getvalue()
+        # Download using batchrunner helper
+        excel_comp_data = results_to_excel(st.session_state.comparison_results)
         
         st.download_button(
             label="📥 Download Comparison Audit Excel Report",
