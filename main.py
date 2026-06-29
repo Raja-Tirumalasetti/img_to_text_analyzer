@@ -289,10 +289,11 @@ if app_mode == "🖼️ Image-based Evaluation":
             ])
             st.dataframe(df_model1, use_container_width=True)
             
-            # Download Excel
+            # Download Excel - Filtered to contain only Image Name and Summary as requested
+            df_model1_excel = df_model1[["Image Name", "Summary"]]
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_model1.to_excel(writer, index=False, sheet_name='Model 1 Results')
+                df_model1_excel.to_excel(writer, index=False, sheet_name='Model 1 Results')
             excel_data = output.getvalue()
             
             st.download_button(
